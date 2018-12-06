@@ -1047,6 +1047,7 @@ def main(_):
     sess.run(init)
 
     # Run the training for as many cycles as requested on the command line.
+    accuracy_course = [[], [], [], [], []]
     for i in range(FLAGS.how_many_training_steps):
       # Get a batch of input bottleneck values, either calculated fresh every
       # time with distortions applied, or from the cache stored on disk.
@@ -1090,14 +1091,19 @@ def main(_):
                 FLAGS.architecture))
         # Run a validation step and capture training summaries for TensorBoard
         # with the `merged` op.
-        validation_summary, validation_accuracy = sess.run(
-            [merged, evaluation_step],
+        validation_summary, validation_accuracy, validation_ce = sess.run(
+            [merged, evaluation_step, cross_entropy],
             feed_dict={bottleneck_input: validation_bottlenecks,
                        ground_truth_input: validation_ground_truth})
         validation_writer.add_summary(validation_summary, i)
         tf.logging.info('%s: Step %d: Validation accuracy = %.1f%% (N=%d)' %
                         (datetime.now(), i, validation_accuracy * 100,
                          len(validation_bottlenecks)))
+        accuracy_course[0].append(i)
+        accuracy_course[1].append(train_accuracy)
+        accuracy_course[2].append(cross_entropy_value)
+        accuracy_course[3].append(validation_accuracy)
+        accuracy_course[4].append(validation_ce)
 
       # Store intermediate results
       intermediate_frequency = FLAGS.intermediate_store_frequency
@@ -1112,32 +1118,65 @@ def main(_):
 
     # We've completed all our training, so run a final test evaluation on
     # some new images we haven't used before.
-    test_bottlenecks, test_ground_truth, test_filenames = (
-        get_random_cached_bottlenecks(
-            sess, image_lists, FLAGS.test_batch_size, 'testing',
-            FLAGS.bottleneck_dir, FLAGS.image_dir, jpeg_data_tensor,
-            decoded_image_tensor, resized_image_tensor, bottleneck_tensor,
-            FLAGS.architecture))
-    test_accuracy, predictions = sess.run(
-        [evaluation_step, prediction],
-        feed_dict={bottleneck_input: test_bottlenecks,
-                   ground_truth_input: test_ground_truth})
-    tf.logging.info('Final test accuracy = %.1f%% (N=%d)' %
-                    (test_accuracy * 100, len(test_bottlenecks)))
+    def test_image_list(lst: dict):
+      test_bottlenecks, test_ground_truth, test_filenames = (
+          get_random_cached_bottlenecks(
+              sess, lst, FLAGS.test_batch_size, 'testing',
+              FLAGS.bottleneck_dir, FLAGS.image_dir, jpeg_data_tensor,
+              decoded_image_tensor, resized_image_tensor, bottleneck_tensor,
+              FLAGS.architecture))
+      test_accuracy, predictions = sess.run(
+          [evaluation_step, prediction],
+          feed_dict={bottleneck_input: test_bottlenecks,
+                     ground_truth_input: test_ground_truth})
 
-    if FLAGS.print_misclassified_test_images:
-      tf.logging.info('=== MISCLASSIFIED TEST IMAGES ===')
-      for i, test_filename in enumerate(test_filenames):
-        if predictions[i] != test_ground_truth[i].argmax():
-          tf.logging.info('%70s  %s' %
-                          (test_filename,
-                           list(image_lists.keys())[predictions[i]]))
+      tf.logging.info('Final test accuracy = %.1f%% (N=%d)' %
+                        (test_accuracy * 100, len(test_bottlenecks)))
+
+      all_cache = []
+      if FLAGS.print_misclassified_test_images or True:
+        tf.logging.info('=== MISCLASSIFIED TEST IMAGES ===')
+        for i, test_filename in enumerate(test_filenames):
+          givenlabel = list(lst.keys())[predictions[i]]
+          correctlabel = list(lst.keys())[test_ground_truth[i].argmax()]
+          all_cache.append((test_filename, correctlabel, givenlabel))
+          if predictions[i] != test_ground_truth[i].argmax():
+            tf.logging.info('%70s  %s' %
+                            (os.path.split(test_filename)[1],
+                             list(lst.keys())[predictions[i]]))
+      out_data = dict(
+        tested_labels=list(lst.keys()),
+        num_images=len(test_filenames),
+        all_image_tests=all_cache
+      )
+      return out_data
+
+    tf.logging.info('Test Accuracy for all')
+    test_output = test_image_list(image_lists)
+
+    # labelwise_test_accuracy = dict()
+    # labelwise_test_data = dict()
+    # for k, v in image_lists.items():
+    #   single_label_list = {k: v}
+    #   tf.logging.info('Test Accuracy for %s.' % k)
+    #   test_data = test_image_list(single_label_list)
+    #   labelwise_test_accuracy[k] = test_data['missclass_stats']
+    #   labelwise_test_data[k] = test_data
+
 
     # Write out the trained graph and labels with the weights stored as
     # constants.
     save_graph_to_file(sess, graph, FLAGS.output_graph)
     with gfile.FastGFile(FLAGS.output_labels, 'w') as f:
       f.write('\n'.join(image_lists.keys()) + '\n')
+
+    return_cache = dict(
+      accuracy_course=accuracy_course,
+      image_lists=image_lists,
+      test_accuracy_data=test_output,
+      flags=dict(vars(FLAGS))
+    )
+    return return_cache
 
 
 def init_parser():
@@ -1326,11 +1365,11 @@ def init_parser():
 
 
 def run_with_args(**kwargs):
-  exec_args = sum([['--' + k, str(v)] for k, v in kwargs.items()], [])
+  exec_args = sum([['--'+k]+[str(v)] if v else [] for k, v in kwargs.items()], [])
   parser = init_parser()
   global FLAGS
   FLAGS = parser.parse_args(exec_args)
-  main(None)
+  return main(None)
 
 
 if __name__ == '__main__':
